@@ -1,0 +1,240 @@
+/* 浮层窗口的样式（右键菜单 + 文件夹面板）。
+ *
+ * ⚠️ 两条铁律（与 Dock 的 glass.css 相同，原因也一样）：
+ *  1. 毛玻璃是 **OS 层**（`SetWindowCompositionAttribute` 的亚克力）做的，
+ *     所以这里只能用**半透明**色。任何不透明背景都会把模糊彻底盖死。
+ *  2. 窗口尺寸**由 Rust 算**（`panel_window.rs`），页面不许自己定宽高：
+ *     行高、分隔线高度、格子边长、列数、内边距、宽度全部通过 `PanelPayload` 传进来，
+ *     这里只负责把它们用在正确的元素上。CSS 里再写一份数值 = 两份真相，
+ *     一旦不一致就是「最后一行被裁掉」。
+ *
+ * 圆角同样不由 CSS 负责：亚克力铺满整个窗口矩形，圆角只能让 DWM 去裁
+ * （`DWMWA_WINDOW_CORNER_PREFERENCE`，见 glass.rs 的模块说明）。
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* 菜单形态没有可滚动的区域；文件夹形态行数超限时会在 .folder-grid 里滚 */
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+.panel {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* OS 亚克力之上的一层遮罩，让文字在任何桌面内容上都清楚 */
+  background: rgba(var(--panel-rgb, 32, 32, 36), 0.32);
+}
+
+/* 深色底（Dock 着色偏暗时）：浅色文字 */
+.panel-dark {
+  color: #f2f2f7;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* 浅色底（Dock 着色偏亮时）：深色文字。
+   深浅由 Rust 按 WCAG 对比度算好（`panel_window::is_dark`），页面不自己判断。 */
+.panel-light {
+  color: #1c1c1e;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.menu-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  /* 与 Rust 侧 menu_width() 的估算对应：左右各 14px */
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+/* 悬停高亮：macOS 的菜单是整行铺满的蓝色 */
+.menu-item:hover:not(:disabled) {
+  background: #0a84ff;
+  color: #fff;
+}
+
+.menu-item:disabled {
+  opacity: 0.4;
+}
+
+.menu-danger {
+  color: #ff5b52;
+}
+
+.panel-dark .menu-danger {
+  color: #ff6f66;
+}
+
+.menu-danger:hover:not(:disabled) {
+  background: #ff453a;
+  color: #fff;
+}
+
+/* 菜单内部的分隔线：一条居中细线，总高度由 Rust 给的 dividerH 决定 */
+.menu-divider {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+}
+
+.menu-divider > span {
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.panel-light .menu-divider > span {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+/* ---------- 悬停标签（鼠标停在图标上时，图标上方那个小气泡） ---------- */
+
+/* macOS 的观感：一小块同材质的圆角底 + 一行字，紧贴在图标上方。
+   尺寸（宽 / 高 / 字号）由 Rust 算好放进 payload —— 和菜单同一套规矩，
+   CSS 里不再写第二份数值。
+
+   ❗底色是**提亮过**的：Rust 对标签单独做了 `brighten(glass_rgb, 0.62)`，
+   所以 `--panel-rgb` 到这里已经是浅色，`dark` 也随之变成 false → 深色文字。
+   别在这里写死深色遮罩：那会把 Rust 那边提亮的效果又盖回去
+   （用户报的"名称提示框有点暗"就是深色遮罩压出来的中灰玻璃 + 白字）。 */
+.panel-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  overflow: hidden;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  /* 比菜单稍实一点：它只有一行字，透太多会看不清 */
+  background: rgba(var(--panel-rgb, 200, 200, 205), 0.55);
+}
+
+.panel-dark.panel-label {
+  color: #f5f5f7;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+/* 提亮后的标签：深色字 + 一点白色高光，像 mac 的帮助标签 */
+.panel-light.panel-label {
+  color: #1c1c1e;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+/* ---------- 文件夹（大文件夹展开后的图标网格） ---------- */
+
+/* 网格本身：列数 / 格子边长 / 间距全部由 Rust 通过 payload 给（内联 style），
+   这里只负责"超出高度就滚动"和居中。 */
+.folder-grid {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: grid;
+  justify-items: center;
+  align-items: center;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 滚动条：细、半透明，别在玻璃上画一条系统灰条 */
+.folder-grid::-webkit-scrollbar {
+  width: 6px;
+}
+.folder-grid::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
+}
+.panel-light .folder-grid::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+/* 一格：图标 + 运行点。整格可点，和 Dock 上的图标手感一致 */
+.folder-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.folder-item:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.panel-light .folder-item:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.folder-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 78%;
+  height: 78%;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.folder-item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.folder-item-fallback {
+  opacity: 0.85;
+}
+
+/* 运行点：**和 Dock 上的白点一模一样的白**。
+ *
+ * ❗不要按主题改成深色：Dock 上的白点是"这个应用开着"的统一视觉语言，
+ * 面板和 Dock 是同一块材质，同一条规则却画成黑的会让人以为是两种状态
+ * （用户报的"加进文件夹后白点变黑点"就是这个）。
+ * 面板罩得比 Dock 实一点，白点在浅色底上对比度低一些 —— 用一层很淡的暗描边补，
+ * 但它仍然是**白点**，不是换了个颜色。 */
+.folder-dot {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.35);
+}

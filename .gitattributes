@@ -1,0 +1,8 @@
+# 换行统一为 LF（仓库里存 LF，工作区按系统检出）。
+# 这是一致性的基础：不写的话，不同机器/编辑器会把整个文件标成"改动"。
+* text=auto eol=lf
+
+# 二进制：别做行尾或编码转换
+*.ico binary
+*.png binary
+*.dmp binary

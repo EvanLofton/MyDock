@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Dock",
+  "version": "0.1.0",
+  "identifier": "dev.local.dock",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "shortDescription": "macOS 风格的 Windows 程序坞",
+    "longDescription": "常驻桌面的 Dock：毛玻璃、鱼眼放大、右键菜单、大文件夹、自动隐藏。与任务栏共存（按 rcWork 留空）。"
+  }
+}

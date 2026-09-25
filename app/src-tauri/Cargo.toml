@@ -1,0 +1,57 @@
+[package]
+name = "dock-app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# 自检脚手架（焦点矩阵 / 应用操作 / IPC 链路 / 子进程模式）。
+# 它只在开发与验证时用，**不属于产品功能**，默认不编译。
+# 需要时：cargo build --features selftest
+selftest = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    # 日志时间戳要用**本地时间**（`GetLocalTime`）；崩溃时"崩在哪个模块"要用
+    # `GetModuleHandleExW(FROM_ADDRESS)` 反查（见 `logging.rs`）
+    "Win32_System_SystemInformation",
+    # 未处理异常过滤器（`SetUnhandledExceptionFilter` / `EXCEPTION_POINTERS`）与
+    # 崩溃现场 Minidump（`MiniDumpWriteDump`）—— 见 `logging.rs`。
+    # ⚠️ 这三个是**间接依赖**：windows crate 把这些 API 挂在了 Kernel / Memory / IO 上，
+    # 只开 `Win32_System_Diagnostics_Debug` 会得到"找不到符号"（实测踩过）。
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_IO",
+    # 日志心跳里的工作集（`GetProcessMemoryInfo`）：8 小时验收要看内存有没有一路涨
+    "Win32_System_ProcessStatus",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
+    "Win32_Storage_Packaging_Appx",
+    # `GetPrivateProfileStringW`：读 `.url`（Internet 快捷方式）里的 IconFile
+    "Win32_System_WindowsProgramming",
+] }
+
+[profile.dev]
+opt-level = 1

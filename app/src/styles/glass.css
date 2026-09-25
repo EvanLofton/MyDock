@@ -1,0 +1,304 @@
+/* Dock 外观。
+   注意：因为毛玻璃是 OS 层（路线 B）做的，这里**只能出现半透明色**。
+   任何不透明的 background 都会把 OS 的模糊完全盖死。 */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  /* 关键：让 OS 的亚克力透上来 */
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* 面板**填满整个窗口**。
+   原因：OS 的亚克力是按窗口矩形铺的，面板只要比窗口小一点，
+   多出来的部分就会露出一块灰底（用户反馈的「灰色背景上才是 Dock」）。
+   所以窗口尺寸由前端按图标行宽上报，面板与窗口严丝合缝。
+
+   圆角**不由 CSS 负责**：实测 `SetWindowRgn` 裁不掉 DWM 的亚克力，
+   自绘圆角只会让四角露出方形灰底。改为让 DWM 裁窗户本身
+   （`DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`），
+   它是唯一能让材质跟着形状走的途径。所以这里不再写 border-radius。 */
+.dock {
+  position: absolute;
+  inset: 0;
+  /* 颜色由配置驱动：`--glass-rgb` 由 App.tsx 写到 documentElement 上，
+     值与 Rust 侧 `glass_rgb` 相同，所以设置页改色调时「OS 亚克力」与
+     「这层 CSS 遮罩」一起变（只改一层会看起来像变了半个）。
+     fallback 是默认的石墨色，保证变量还没写上去时也是对的。 */
+  background: rgba(var(--glass-rgb, 24, 24, 28), 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.dock-row {
+  /* 绝对定位 + 居中锚定：面板尺寸变化时行的左边界保持不动 */
+  position: absolute;
+  bottom: 0;
+  height: 100%;
+  /* 允许图标往上长出去（但会被窗口裁掉，所以倍率已在组件里收敛） */
+  overflow: visible;
+  display: block;
+}
+
+.dock-icon {
+  position: absolute;
+  /* 必须与 Dock.tsx 的 ICON_BOTTOM 一致 */
+  bottom: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 11px;
+  /* 从底边中心向上生长，符合 macOS 观感 */
+  transform-origin: bottom center;
+  will-change: transform;
+  cursor: pointer;
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 16px;
+  font-weight: 600;
+  transition: filter 120ms ease;
+}
+
+.dock-icon:hover {
+  filter: brightness(1.15);
+}
+
+/* ---------- Dock 内拖拽排序 / 拖出移除 ---------- */
+/* 被拖起来的图标：盖住邻居（位移与放大由 JS 的 transform 负责） */
+.dock-icon.dragging {
+  z-index: 10;
+  cursor: grabbing;
+}
+
+/* 已经拖到面板外、松手就会被移除 */
+.dock-icon.will-remove {
+  opacity: 0.3;
+}
+
+/* 拖到面板外时的整体反馈：整块描一圈红边。
+   和 `.dock-hint`（文字）配合用 —— 边框负责「整个 Dock 在警告」，
+   文字负责说清「松手会发生什么、移除的是哪一个」。 */
+.dock.remove-intent {
+  box-shadow: inset 0 0 0 2px rgba(255, 69, 58, 0.85);
+}
+
+/* 拖到面板外时的**文字**提示。
+   放在面板顶部 y=2..19 那条空白带里（图标占 y=20..64，不会重叠）。
+   面板只有 72px 高，这是唯一放得下文字的位置 —— 也不能用弹窗，
+   那样会超出窗口被裁掉（原生菜单能超出是因为它是独立的系统对象）。 */
+.dock-hint {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 16px);
+  padding: 1px 10px;
+  border-radius: 8px;
+  background: rgba(255, 69, 58, 0.94);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* ---------- 分割线（纯视觉分组） ---------- */
+
+/* 分割线复用了 .dock-icon 这个 button（拖拽/右键/点击行为要和图标完全一致），
+   所以这里必须把它"图标化"的东西全部去掉：圆角、阴影、hover 变亮。
+   否则一个空心的圆角方块看起来像"某个图标加载失败了"。 */
+.dock-icon.dock-sep {
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent !important;
+  filter: none;
+}
+
+/* 竖线本身。高度由 Dock.tsx 按图标边长算（iconSize × 0.68），跟着图标一起变高。
+ *
+ * ❗**一条浅色细线，没有描边、没有阴影、没有第二种颜色。**
+ *
+ * 两次踩坑记在这里，别再往回改：
+ *  1. 第一版是「白线 + 1px 深色描边」（想在浅色底和深色底上都看得见）→
+ *     一条 1px 的线被描成 3px 的黑白夹心，用户反馈「中间白四周黑，太明显」。
+ *  2. 第二版换成中性灰 `rgba(120,120,128,.5)`（想用"中间色在明暗两边都有对比度"）→
+ *     **实测完全看不见**：Dock 的着色是半透明的，实际渲染出来的底色由**桌面内容**决定，
+ *     本机量到是 `#797980`（约 121），正好和这个灰一样。
+ *
+ * 结论：线条颜色必须按**渲染后的底色**选，而那个值是动态的，CSS 里选不出来。
+ * 所以跟运行白点用同一套办法 —— 浅色半透明，在偏暗的玻璃上必然可见；
+ * 桌面很亮时它同样会变淡，这是这套玻璃底座的固有取舍（白点也一样）。
+ * 0.42 是量出来的：本机底 121、线 175，对比度差 54（看得见但不抢眼）。 */
+.dock-sep-line {
+  width: 1px;
+  background: rgba(255, 255, 255, 0.42);
+  border-radius: 1px;
+  transition: background 120ms ease;
+}
+
+/* 悬停时只提亮一点，表明"这条线是可以点/拖的" */
+.dock-icon.dock-sep:hover .dock-sep-line {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+/* ---------- 大文件夹（Dock 上的文件夹图标） ---------- */
+
+/* 文件夹图标：一个半透明圆角底 + 里面 2×2 的缩略图。
+   为什么要预览：只画一个文件夹轮廓的话，用户看不出里面装了什么，
+   而这正是"大文件夹"相对"普通文件夹图标"的全部价值。
+   注意**不能**加 box-shadow：图标是带透明的 PNG，阴影会画出一块方形底板（见 .has-icon 的说明）。 */
+.dock-icon.dock-folder {
+  background: transparent !important;
+  border-radius: 11px;
+  box-shadow: none;
+  filter: none;
+}
+
+.dock-folder-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 8%;
+  width: 84%;
+  height: 84%;
+  padding: 7%;
+  box-sizing: border-box;
+  border-radius: 22%;
+  /* 底：比 Dock 玻璃亮一点点，看起来像"一个装着东西的容器"。
+     用半透明色 —— 不透明的底会把 OS 的毛玻璃盖死。 */
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+.dock-folder-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.dock-folder-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* 拖到文件夹上（松手即放入）：描一圈蓝边，和"要删了"的红边区分开 */
+.dock-icon.dock-folder.drop-target {
+  background: rgba(10, 132, 255, 0.22) !important;
+  box-shadow: inset 0 0 0 2px rgba(10, 132, 255, 0.9);
+}
+
+.dock-icon-label {
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.dock-dot {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+/* 有真实图标时：去掉占位用的圆角底色，**并且不加任何阴影**。
+   ❗为什么连阴影都不能加：
+   - `box-shadow` 画的是**按钮矩形**的阴影 —— 图标是透明 PNG，
+     于是每个图标背后都出现一块方形暗色底板（实测图标正下方有与图标等宽的 `#414144` 暗带）；
+   - 换成 `drop-shadow`（按 alpha 形状投影）也只是好一点：像资源管理器这种
+     **文件夹图标本身就近乎满方**，投影依然是接近方形的暗带，看起来仍像"底板"。
+   所以直接不加阴影，让图标真正"浮"在玻璃上。 */
+.dock-icon.has-icon {
+  box-shadow: none;
+  background: transparent !important;
+  filter: none;
+}
+
+.dock-icon-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* 以管理员权限运行 —— 盾牌角标 */
+.dock-shield {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #ffd60a, #ff9f0a);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.dock-empty,
+.dock-error {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  transform: translateX(-50%);
+  min-width: 260px;
+  height: 48px;
+  border-radius: 16px;
+  background: rgba(24, 24, 28, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  box-sizing: border-box;
+}
+
+/* 操作失败提示（例如前台锁定、提权窗口）——绝不静默失败 */
+.dock-toast {
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  transform: translateX(-50%);
+  max-width: 90%;
+  padding: 5px 14px;
+  border-radius: 12px;
+  background: rgba(255, 69, 58, 0.86);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}

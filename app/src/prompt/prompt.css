@@ -1,0 +1,137 @@
+/* 命名输入框的样式。
+ *
+ * ⚠️ 与浮层同一套铁律：**只能用半透明色**。毛玻璃是 OS 层（`SetWindowCompositionAttribute`
+ * 的亚克力）铺在**整个窗口矩形**上的，任何不透明背景都会把模糊彻底盖死。
+ * 圆角同理不由 CSS 负责（亚克力铺满整窗，只能让 DWM 去裁，见 `glass.rs`）。
+ *
+ * 尺寸**由 Rust 算**：窗口高度必须等于内容的实际高度，所以这里排版用固定行高、
+ * 不出现滚动条（`prompt_window.rs` 里按同一组数字算窗口尺寸 —— 两处不一致就会裁字，
+ * 上一版的原生窗口就是栽在这上面）。
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+.prompt {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  /* 内边距只影响**内部**排版：窗口高度在 Rust 侧写死（`prompt_window::H`），
+     这里加大 = 内容变高 = 底部按钮被裁（`overflow: hidden`），改之前先算总高 */
+  padding: 16px 18px 14px;
+  /* OS 亚克力之上的一层遮罩，和浮层同色同浓度 */
+  background: rgba(var(--panel-rgb, 32, 32, 36), 0.32);
+  color: #f2f2f7;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.prompt-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  margin-bottom: 10px;
+}
+
+.prompt-label {
+  font-size: 12px;
+  opacity: 0.72;
+  margin-bottom: 6px;
+}
+
+.prompt-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  /* 输入框里要能选字、能看见光标 */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.prompt-input:focus {
+  border-color: rgba(10, 132, 255, 0.85);
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
+}
+
+.prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 顶到窗口底部：这样"按钮在最下"的观感和窗口高度是自洽的 */
+  margin-top: auto;
+}
+
+/* 字数：一直占着位置（不因为没超限就消失，那样按钮会左右跳） */
+.prompt-count {
+  margin-right: auto;
+  font-size: 11px;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.prompt-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.prompt-btn.primary {
+  background: #0a84ff;
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-weight: 500;
+}
+
+.prompt-btn.primary:hover {
+  background: #2492ff;
+}
+
+.prompt-btn.primary:disabled {
+  background: rgba(10, 132, 255, 0.35);
+  color: rgba(255, 255, 255, 0.55);
+  cursor: default;
+}

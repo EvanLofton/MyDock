@@ -1,0 +1,37 @@
+# 构建产物
+# （gen/schemas 是 tauri-build 每次构建自动生成的，官方模板同样忽略它）
+app/src-tauri/gen/schemas/
+target/
+node_modules/
+app/dist/
+app/.tmpcheck/
+
+# 开发环境专用（不进版本库）
+.npm-cache/
+.webview2/
+app/src-tauri/*.log
+
+# 跑脚本时产生的运行时文件（scripts/selftest.ps1 用配置副本，scripts/soak.ps1 写采样日志）
+.selftest-cfg/
+.dockcfg/
+.soak-pid
+.soak.out
+.soak.err
+.soak-log.txt
+.dock-boot.log
+.gate.log
+.gate.err
+
+# 本地调试/取证留下的文件（日志与崩溃报告现在都写在 %LOCALAPPDATA%，
+# 这里只是兜住偶尔重定向到仓库根的情况 —— 别把别人的机器信息提交上去）
+*.log
+*.dmp
+.gate*.log
+.dock*.log
+.prompt*.log
+*.png.orig
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
