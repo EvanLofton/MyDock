@@ -111,3 +111,95 @@ pub fn current_exe() -> Option<String> {
         .ok()
         .map(|p| p.to_string_lossy().to_string())
 }
+
+/// 去掉注册表值两边的引号（`enable` 按惯例是带引号写的）。
+fn unquote(v: &str) -> &str {
+    v.trim().trim_matches('"')
+}
+
+/// **启动对账**的纯判断（不碰注册表，便于单测）。
+///
+/// 返回 `None` = 一致、什么都不用做；`Some(true)` = 补登记；`Some(false)` = 删掉登记。
+///
+/// # 为什么需要它（2026-09 用户机器实测）
+///
+/// `config.json` 里的 `launch_at_login` 是**用户的意图**，`HKCU\...\Run\Dock` 是**事实**。
+/// 两者会被"程序之外的动作"弄脱节：**卸载旧版本会删掉那个 Run 项**，而配置里的开关还是
+/// `true` —— 于是重装之后设置页/托盘都显示"开机自启：开"，**实际根本不会自启**。
+/// 根因是程序只在"开关被改动时"才写注册表（`commands::set_preferences`），
+/// 启动路径上没人核对过。
+///
+/// 顺带也修掉"登记的路径不是当前 exe"这种脱节（换过安装目录、或曾经被开发构建登记过）。
+pub fn reconcile_action(want: bool, registered: Option<&str>, exe: Option<&str>) -> Option<bool> {
+    match (want, registered) {
+        // 关着、也没登记 —— 绝大多数启动走这条，一个注册表写操作都没有
+        (false, None) => None,
+        // 用户关了、但还登记着 → 删掉（否则下次登录还会起来）
+        (false, Some(_)) => Some(false),
+        // 想自启、但没登记 → 补上
+        (true, None) => Some(true),
+        // 登记着，但**路径不是当前 exe** → 重写成当前路径
+        (true, Some(v)) => match exe {
+            Some(e) if unquote(v) != e => Some(true),
+            // 自身路径都取不到时**不动**：宁可不动，也别把一个取不到路径的登记写进去
+            _ => None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_action;
+
+    const EXE: &str = r"D:\MyDock\dock-app.exe";
+    const OLD: &str = r"C:\Program1\Projects\Dock\app\src-tauri\target\release\dock-app.exe";
+
+    #[test]
+    fn nothing_to_do_when_the_switch_is_off_and_nothing_is_registered() {
+        // 最常见的启动：关着、没登记 —— 必须是"什么都不做"（不要每次启动都写一遍注册表）
+        assert_eq!(reconcile_action(false, None, Some(EXE)), None);
+    }
+
+    #[test]
+    fn re_registers_after_a_reinstall_wiped_the_run_entry() {
+        // 用户机器上真实发生的那一次：配置说"要自启"，卸载旧版把 Run 项删了
+        assert_eq!(reconcile_action(true, None, Some(EXE)), Some(true));
+    }
+
+    #[test]
+    fn removes_a_stale_entry_when_the_switch_is_off() {
+        let reg = format!("\"{EXE}\"");
+        assert_eq!(reconcile_action(false, Some(reg.as_str()), Some(EXE)), Some(false));
+    }
+
+    #[test]
+    fn rewrites_when_the_registered_path_is_not_this_exe() {
+        // 换过安装目录 / 曾被开发构建登记过
+        let quoted_old = format!("\"{OLD}\"");
+        assert_eq!(
+            reconcile_action(true, Some(quoted_old.as_str()), Some(EXE)),
+            Some(true)
+        );
+        // 没引号的登记（别的工具写的）也要认得
+        assert_eq!(reconcile_action(true, Some(OLD), Some(EXE)), Some(true));
+    }
+
+    #[test]
+    fn leaves_a_correct_entry_alone() {
+        let ok = format!("\"{EXE}\"");
+        assert_eq!(reconcile_action(true, Some(ok.as_str()), Some(EXE)), None);
+        // 带首尾空白的登记也算一致（读注册表时本来就 trim 过）
+        let padded = format!("  \"{EXE}\"  ");
+        assert_eq!(reconcile_action(true, Some(padded.as_str()), Some(EXE)), None);
+    }
+
+    #[test]
+    fn does_nothing_when_own_path_is_unavailable() {
+        // 取不到自身路径：宁可不动 —— 别把登记改成空字符串
+        let quoted_old = format!("\"{OLD}\"");
+        assert_eq!(
+            reconcile_action(true, Some(quoted_old.as_str()), None),
+            None
+        );
+    }
+}

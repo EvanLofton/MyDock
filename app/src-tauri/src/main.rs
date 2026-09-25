@@ -274,6 +274,57 @@ fn main() {
                 log_error!("[托盘] 创建失败: {e}");
             }
 
+            // 开机自启的**启动对账**：以 config 里的开关为准，把注册表这个"事实"纠正过来。
+            //
+            // ❗只在**不一致**时动一个注册表写操作（`autostart::reconcile_action` 是纯判断，
+            // 有单测；最常见的启动是"关着、也没登记" → 什么都不做）。
+            //
+            // 为什么要这一步（2026-09 用户机器实测）：`launch_at_login` 是**用户的意图**，
+            // `HKCU\...\Run\Dock` 是**事实**。卸载旧版本会把 Run 项删掉，而配置里的开关
+            // 还是 `true` —— 重装之后设置页和托盘都显示"开机自启：开"，**实际根本不会自启**。
+            // 根因是程序只在"开关被改动时"才写注册表，启动路径上从来没人核对过。
+            // 顺带也修掉"登记的路径不是当前 exe"这种脱节（换过安装目录、曾被开发构建登记过）。
+            // ❗两种情况下**一个注册表字节都不动**：
+            //   ① 自检/沙箱（设了 `DOCK_CONFIG_DIR`）：闸门跑的是 `target\debug` 的构建，
+            //      绝不能把用户真实的 Run 项改到调试路径上 —— **实测踩到过**：
+            //      跑一次闸门，开机自启就指向了 `target\debug\dock-app.exe`；
+            //   ② 开发构建（exe 落在 `target\debug|release` 下）：同理 ——
+            //      开发时随手起一个 Dock，不该把用户装好的那份的"开机自启"抢走。
+            let sandboxed = std::env::var("DOCK_CONFIG_DIR").is_ok();
+            let dev_build = crate::autostart::current_exe()
+                .map(|e| e.contains(r"\target\debug\") || e.contains(r"\target\release\"))
+                .unwrap_or(false);
+            let registered_before = crate::autostart::current_entry();
+            if sandboxed || dev_build {
+                log_info!(
+                    "[自启] 启动对账：跳过（{}）—— 不动用户的注册表（现在登记的是 {:?}）",
+                    if sandboxed { "自检沙箱 DOCK_CONFIG_DIR" } else { "开发构建 target\\…" },
+                    registered_before
+                );
+            } else {
+                match crate::autostart::reconcile_action(
+                    prefs.launch_at_login,
+                    registered_before.as_deref(),
+                    crate::autostart::current_exe().as_deref(),
+                ) {
+                    Some(want) => match store::set_launch_at_login(&handle, want) {
+                        Ok(()) => log_info!(
+                            "[自启] 启动对账：配置={} / 注册表={:?} → 已{}登记（现在为 {:?}）",
+                            if prefs.launch_at_login { "开" } else { "关" },
+                            registered_before,
+                            if want { "补上" } else { "删除" },
+                            crate::autostart::current_entry()
+                        ),
+                        Err(e) => log_warn!("[自启] 启动对账失败（不影响 Dock 使用）: {e}"),
+                    },
+                    None => log_debug!(
+                        "[自启] 启动对账：一致（配置={}，注册表={:?}）",
+                        if prefs.launch_at_login { "开" } else { "关" },
+                        registered_before
+                    ),
+                }
+            }
+
             let mut builder =
                 WebviewWindowBuilder::new(app, "dock", WebviewUrl::App("index.html".into()))
                     .title("Dock")
