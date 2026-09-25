@@ -13,7 +13,11 @@ use tauri::{AppHandle, Manager};
 
 use crate::store::{self, PrefsState};
 
-pub fn build(app: &AppHandle) -> tauri::Result<()> {
+/// 构建托盘菜单。
+///
+/// 抽成独立函数是为了**能重建**：勾选状态（自动隐藏 / 开机自启）由 `refresh` 重读配置
+/// 后再建一次 —— 这样设置页改动后托盘不会和界面不一致。
+pub fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let prefs = app.state::<PrefsState>().0.lock().unwrap().clone();
 
     let add = MenuItem::with_id(app, "add-app", "添加应用…", true, None::<&str>)?;
@@ -64,14 +68,33 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let open_logs = MenuItem::with_id(app, "open-logs", "打开日志目录", true, None::<&str>)?;
     let open_cfg = MenuItem::with_id(app, "open-config", "打开配置目录", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
+    Ok(Menu::with_items(
         app,
         &[
             &add, &loc_menu, &temp, &settings, &autohide, &autostart, &open_logs, &open_cfg, &sep,
             &quit,
         ],
-    )?;
+    )?)
+}
 
+/// 重建托盘菜单（设置页改了自动隐藏/开机自启后调它，保持两边一致）。
+pub fn refresh(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("dock-tray") else {
+        return;
+    };
+    match build_menu(app) {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                log_warn!("[托盘] 重建菜单失败: {e}");
+            }
+        }
+        Err(e) => log_warn!("[托盘] 构建菜单失败: {e}"),
+    }
+}
+
+/// 创建托盘图标（菜单由 [`build_menu`] 提供）。
+pub fn build(app: &AppHandle) -> tauri::Result<()> {
+    let menu = build_menu(app)?;
     let mut builder = TrayIconBuilder::with_id("dock-tray")
         .menu(&menu)
         .tooltip("Dock")
@@ -178,34 +201,23 @@ fn on_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
             log_info!("[托盘] 自动隐藏 -> {}", p.auto_hide);
         }
         "autostart" => {
-            let mut p = app.state::<PrefsState>().0.lock().unwrap().clone();
+            // 目标是「取反当前实际状态」，而不是「取反配置里记的状态」——
+            // 注册表才是事实（用户可能手工删过 Run 项）。
             let want = !crate::autostart::is_enabled();
-            let result = if want {
-                match crate::autostart::current_exe() {
-                    Some(exe) => crate::autostart::enable(&exe),
-                    None => Err("无法取得自身路径".into()),
-                }
-            } else {
-                crate::autostart::disable()
-            };
-            match result {
-                Ok(()) => {
-                    p.launch_at_login = want;
-                    if let Err(e) = store::save(app, &p) {
-                        log_error!("[托盘] 保存配置失败: {e}");
-                    }
-                    *app.state::<PrefsState>().0.lock().unwrap() = p;
-                    log_info!("[托盘] 开机自启 -> {want}");
-                }
-                Err(e) => {
-                    log_error!("[托盘] 设置开机自启失败: {e}");
-                    // 失败时把勾选状态复原，避免界面与实际不一致
-                    if let Some(tray) = app.tray_by_id("dock-tray") {
-                        let _ = tray.set_visible(true);
-                    }
-                }
+            if let Err(e) = store::set_launch_at_login(app, want) {
+                log_error!("[托盘] 设置开机自启失败: {e}");
+                // 失败时把勾选恢复成**实际**状态，避免界面撒谎
+                sync_check(app, "autostart", crate::autostart::is_enabled());
             }
         }
         _ => {}
     }
+}
+
+/// 同步托盘勾选状态：**重建菜单**（勾选值在 `build_menu` 里现读配置/注册表）。
+///
+/// 为什么不直接 `set_checked`：这个 Tauri 版本没有 `TrayIcon::menu()`，
+/// 拿不回菜单项句柄；重建一次既简单又不会出现"界面与实际不一致"。
+pub fn sync_check(app: &AppHandle, _id: &str, _on: bool) {
+    refresh(app);
 }

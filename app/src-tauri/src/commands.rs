@@ -110,6 +110,16 @@ pub fn set_preferences(
 
     crate::store::save(&app, &prefs)?;
     *app.state::<crate::store::PrefsState>().0.lock().unwrap() = prefs.clone();
+
+    // 开机自启：设置页和托盘菜单都能改这项，**都走 store::set_launch_at_login**
+    // （写注册表 + 落配置 + 同步托盘勾选）。这里只在"想要的与注册表里的实际状态不一致"
+    // 时才动手 —— 免得每次改别的设置都去写一遍注册表。
+    if prefs.launch_at_login != crate::autostart::is_enabled() {
+        if let Err(e) = crate::store::set_launch_at_login(&app, prefs.launch_at_login) {
+            log_error!("[配置] 应用开机自启失败: {e}");
+        }
+    }
+
     apply_live(&app, &prefs);
     Ok(())
 }

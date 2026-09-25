@@ -827,6 +827,29 @@ pub fn config_dir(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// 设置开机自启（**唯一入口**）：写注册表 + 落配置 + 同步托盘勾选。
+///
+/// 为什么收敛成一个函数：托盘菜单和设置页都能改这项，两边各写一遍必然出现
+/// "界面显示已开启、注册表里其实没有"这类不一致 —— 实测托盘的旧代码在失败时
+/// 只调了 `set_visible(true)`（对勾选状态毫无作用），界面就撒谎了。
+pub fn set_launch_at_login(app: &AppHandle, want: bool) -> Result<(), String> {
+    if want {
+        let exe = crate::autostart::current_exe().ok_or_else(|| "无法取得自身路径".to_string())?;
+        crate::autostart::enable(&exe)?;
+    } else {
+        crate::autostart::disable()?;
+    }
+
+    let mut p = app.state::<PrefsState>().0.lock().unwrap().clone();
+    p.launch_at_login = want;
+    save(app, &p)?;
+    *app.state::<PrefsState>().0.lock().unwrap() = p;
+
+    crate::tray::sync_check(app, "autostart", want);
+    log_info!("[配置] 开机自启 -> {want}");
+    Ok(())
+}
+
 /// 读取配置。文件不存在或解析失败一律退回默认值 —— 配置坏了不应该让程序起不来。
 pub fn load(app: &AppHandle) -> Preferences {
     let p = config_path(app);

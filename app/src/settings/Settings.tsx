@@ -303,6 +303,7 @@ export default function Settings() {
   const hideDelay = prefs?.hideDelayMs ?? 420;
   const showDots = prefs?.showRunningIndicators ?? true;
   const reserveTb = prefs?.reserveTaskbar ?? true;
+  const launchAtLogin = prefs?.launchAtLogin ?? false;
   const panelHeight = prefs?.panelHeight ?? 72;
   /** 图标之间的间距（逻辑像素） */
   const iconGap = prefs?.iconGap ?? 10;
@@ -609,8 +610,8 @@ export default function Settings() {
             <Field title="运行指示点" desc="给正在运行的应用在图标下方画一个白点">
               <Toggle on={showDots} onChange={(v) => apply({ showRunningIndicators: v })} />
             </Field>
-            <Field title="开机自启" desc="在托盘菜单里切换（要写注册表，不走这里）">
-              <span className="val">{info?.launchAtLogin ? "已开启" : "未开启"}</span>
+            <Field title="开机自启" desc="登录 Windows 后自动启动 Dock（写当前用户的 Run 项，不需要管理员）">
+              <Toggle on={launchAtLogin} onChange={(v) => apply({ launchAtLogin: v })} />
             </Field>
           </div>
         </section>
