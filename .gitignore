@@ -31,6 +31,9 @@ app/src-tauri/*.log
 .prompt*.log
 *.png.orig
 
+# 仓库根目录下的隐藏调试截图（我自己截图核对用的，别进版本库）
+.*.png
+
 # 编辑器
 .vscode/
 .idea/
