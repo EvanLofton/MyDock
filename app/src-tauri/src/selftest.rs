@@ -634,6 +634,34 @@ fn drag_from_to(x0: i32, y0: i32, x1: i32, y1: i32, steps: i32) -> u32 {
     n
 }
 
+/// ⑧ 用：造一个**桌面系窗口**（类名故意就叫 `WorkerW` —— 桌面层守卫的判据就是类名）。
+///
+/// ❗必须由**主线程**创建（见文件头说明：只有主线程在跑消息循环）。
+/// 这一条尤其要紧：守卫是**从自动隐藏线程跨线程** `SetWindowPos` 沉它的，而
+/// `SetWindowPos` 会**同步**发 `WM_WINDOWPOSCHANGING` 给窗口过程 —— 窗口过程跑在
+/// 拥有它的线程上。若那个线程正是卡在自检里等结果的后台线程，这次沉回就会一直阻塞到
+/// 自检超时（实测会变成"守卫没工作"的假失败）。
+pub fn create_desktop_helper(x: i32, y: i32, w: i32, h: i32) -> Option<HWND> {
+    unsafe {
+        let c = register("WorkerW");
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(c.as_ptr()),
+            windows::core::w!("SELFTEST-DESKTOP-HELPER"),
+            WS_POPUP | WS_VISIBLE,
+            x,
+            y,
+            w,
+            h,
+            None,
+            None,
+            Some(hinst()),
+            None,
+        )
+        .ok()
+    }
+}
+
 /// 必须由**主线程**调用（见文件头说明）
 pub struct TestWindows {
     pub settings: HWND,
@@ -3631,7 +3659,7 @@ unsafe extern "system" fn scan_below_cb(h: HWND, _l: LPARAM) -> BOOL {
 /// `SWP_NOZORDER`、`WM_STYLECHANGING` 抹掉 `WS_EX_TOPMOST`（都在**改动生效之前**）。
 /// 这条自检把那个行为钉住 —— 关键是断言"**当场**就没生效"，而不是"过一会儿被纠正"：
 /// 后者（轮询）有最长一个周期的暴露窗口，游戏里那一眼就够用户看见 Dock 了。
-pub fn drive_layering_test(dock: HWND) {
+pub fn drive_layering_test(app: &tauri::AppHandle, dock: HWND) {
     log_info!("\n============= 层级自检：Dock 固定在桌面那一层 =============");
     let mut pass = 0;
     let mut fail = 0;
@@ -3754,6 +3782,142 @@ pub fn drive_layering_test(dock: HWND) {
         format!("{s0} → {s1}"),
     );
 
+    // ---- ⑦ 桌面层被抬到 Dock 上面之后，Dock 必须**很快**回来 ----
+    //
+    // 2026-09 用户实测："在桌面按 Win+D，Dock 就藏起来了"。根因：Win+D 会让 shell 把
+    // 桌面窗口（`Progman`）抬到**最前** —— 实测按下去当帧它就从句柄序第 116 位跳到第 16 位，
+    // 于是整条 Dock 被壁纸盖住；而当时的守护是**每 2 秒**才扫一次 Z 序，
+    // 用户看到的就是"Dock 没了"（100ms 采样实测空档 1.7 秒）。
+    //
+    // ❗复现用**自造的同名类窗口**（类名 `WorkerW`），而不是真去抬 `Progman`：
+    // 实测在**普通状态**下 shell 把桌面钉在 Z 序底部 —— `SetWindowPos(Progman, HWND_TOP)`
+    // 返回 `Ok(())` 但**立刻被 shell 忽略**（只有在"显示桌面"模式下它才真的抬得起来，
+    // 所以早先两轮"通过"是环境凑巧，实测撞到过两次假失败）。
+    // 判据本来就是"类名 ∈ {`Progman`/`WorkerW`/`SHELLDLL_DefView`}"，
+    // 所以同名类窗口走的是**同一条代码路径**，而且完全确定性。
+    //
+    // 窗口由**主线程**创建（自检的硬规矩：只有主线程跑消息循环），位置**故意盖住 Dock
+    // 正中心**，这样"点探测"和"全量扫 Z 序"两条路都会被覆盖到。
+    let (wh_fg, wh_mn) = crate::win_layer::desktop_watch_handles();
+    check(
+        wh_fg != 0 && wh_mn != 0,
+        "⑦ WinEvent 事件钩子已装上（前台 + 最小化各一把）",
+        format!("前台={wh_fg:#x} 最小化={wh_mn:#x}"),
+    );
+    {
+        let dr = window_rect(dock);
+        let (hw, hh) = (80, 60);
+        let hx = (dr.left + dr.right) / 2 - hw / 2;
+        let hy = (dr.top + dr.bottom) / 2 - hh / 2;
+        let (tx, rx) = std::sync::mpsc::channel::<isize>();
+        let _ = app.run_on_main_thread(move || {
+            let h = create_desktop_helper(hx, hy, hw, hh)
+                .map(|h| h.0 as isize)
+                .unwrap_or(0);
+            let _ = tx.send(h);
+        });
+        let addr = rx.recv_timeout(Duration::from_secs(5)).unwrap_or(0);
+        let helper = HWND(addr as *mut core::ffi::c_void);
+        if helper.0.is_null() {
+            check(false, "⑦ 造一个桌面系辅助窗口（类名 WorkerW）", "没建出来".into());
+        } else {
+            let sinks0 = crate::reveal::DESKTOP_SINKS.load(Ordering::SeqCst);
+            let res = unsafe {
+                SetWindowPos(
+                    helper,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+            // ❗抬起之后**不能 sleep 再看**：点探测当帧就会把它沉回去（这正是修出来的效果），
+            // 睡一觉再问会得到"它已经不在上面了"，前置条件假失败（第一版就这么写的，实测撞到）。
+            // 所以主证用**沉回计数器**（守卫真的动过手），时序只做补充。
+            let probe_sees = crate::win_layer::desktop_covers_dock_center(dock);
+            let left_now = crate::win_layer::visible_desktops_above(dock);
+            let t0 = std::time::Instant::now();
+            let mut left = left_now.clone();
+            while t0.elapsed() < Duration::from_millis(1500) && !left.is_empty() {
+                std::thread::sleep(Duration::from_millis(20));
+                left = crate::win_layer::visible_desktops_above(dock);
+            }
+            let ms = t0.elapsed().as_millis();
+            let sinks = crate::reveal::DESKTOP_SINKS.load(Ordering::SeqCst) - sinks0;
+            check(
+                res.is_ok() && (sinks > 0 || !left_now.is_empty()),
+                "⑦ 复现成功：桌面系窗口确实被抬到了 Dock 上面（或已被守卫沉回）",
+                format!(
+                    "SetWindowPos(HWND_TOP) → {res:?}；抬起瞬间压在 Dock 上面 {} 个、\
+                     点探测看得到={probe_sees}、沉回计数 +{sinks}",
+                    left_now.len()
+                ),
+            );
+            check(
+                left.is_empty(),
+                "⑦ 桌面被抬起后**自动**沉回 Dock 下方（用户什么都不用做）",
+                format!("用时 {ms}ms"),
+            );
+            // 点探测看得到那个点 → 必须当帧级发现（200ms 很宽）；看不到 → 只能等 500ms 兜底
+            // （800ms 上限）。原来 2 秒的守护在两种情况下都会 FAIL。
+            //
+            // ⚠️ 阈值只看 `probe_sees`，**不能**看 `left_now`：Z 序上"桌面在 Dock 上面"
+            // 和"Dock 中心那个点被桌面接管"是两件事 —— 中心点很可能被某个应用窗口盖着
+            // （用户日常就是这样），此时点探测本来就看不见，只能走兜底。实测踩到过。
+            let limit = if probe_sees { 200 } else { 800 };
+            check(
+                ms <= limit,
+                "⑦ 沉回够快",
+                format!("用时 {ms}ms（阈值 {limit}ms，抬起瞬间点探测可见={probe_sees}）"),
+            );
+            // 清理：辅助窗口也由主线程销毁（创建它的线程）。
+            // `HWND` 含裸指针、不是 `Send`，跨线程只传地址。
+            let (dtx, drx) = std::sync::mpsc::channel::<()>();
+            let haddr = helper.0 as isize;
+            let _ = app.run_on_main_thread(move || {
+                unsafe {
+                    let _ = DestroyWindow(HWND(haddr as *mut core::ffi::c_void));
+                }
+                let _ = dtx.send(());
+            });
+            let _ = drx.recv_timeout(Duration::from_secs(3));
+        }
+    }
+
+    // ---- ⑧ Dock 不能**被最小化**（Win+M / 任务栏"最小化所有窗口"会把它一起收走）----
+    //
+    // 为什么这条是"绝不允许"：Dock 没有任务栏按钮、没有标题栏 —— 一旦被收走，
+    // **用户没有任何手段把它叫回来**，表现为"软件还在跑、桌面上什么都没有"的假死。
+    // 防线是 `dock_subclass_proc` 里吃掉 `WM_SYSCOMMAND` 的 `SC_MINIMIZE`
+    // （窗口状态从来没变过，比"被最小化再还原"更好）。
+    //
+    // 这里直接给自己发一条 `SC_MINIMIZE`：同一线程内 `SendMessageW` 就是一次直接调用，
+    // 不需要合成点击，所以这一项在任何环境下都能跑。
+    let m0 = crate::win_layer::MINIMIZE_BLOCKS.load(Ordering::SeqCst);
+    unsafe {
+        let _ = SendMessageW(
+            dock,
+            WM_SYSCOMMAND,
+            Some(WPARAM(SC_MINIMIZE as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+    std::thread::sleep(Duration::from_millis(80));
+    let m1 = crate::win_layer::MINIMIZE_BLOCKS.load(Ordering::SeqCst);
+    let iconic = unsafe { IsIconic(dock).as_bool() };
+    check(
+        !iconic,
+        "⑧ 收到 SC_MINIMIZE 之后 Dock **没有**被最小化（真吃掉了，不是事后还原）",
+        format!("IsIconic={iconic}，窗口扩展样式={:#X}", ex_style(dock)),
+    );
+    check(
+        m1 > m0,
+        "⑧ 这条消息确实进了子类窗口过程（计数涨了，不是碰巧没生效）",
+        format!("{m0} → {m1}"),
+    );
+
     log_info!("  小结：{pass} 项通过，{fail} 项失败");
     log_info!("========================================================\n");
 }
@@ -3775,7 +3939,7 @@ pub fn run_if_enabled(app: &tauri::AppHandle, hwnd: HWND) {
     // 它管的是"Dock 永远不会升到别人上面"，而这一条正是最容易被外部/我们自己的
     // 无心改动破坏的行为（用户 2026-09 明确要求过）。
     if std::env::var("DOCK_LAYERTEST").as_deref() != Ok("0") {
-        drive_layering_test(hwnd);
+        drive_layering_test(app, hwnd);
     }
     // 辅助窗口必须由**主线程**创建（只有主线程在跑消息循环），
     // 测试本身在后台线程驱动（要 sleep，不能占用主线程）

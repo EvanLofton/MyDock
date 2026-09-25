@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::*;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Controls::{INITCOMMONCONTROLSEX, InitCommonControlsEx};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
@@ -49,6 +50,23 @@ pub static ZORDER_BLOCKS: AtomicU32 = AtomicU32::new(0);
 /// 被抹掉的「直接给 Dock 加置顶样式」次数（`WM_STYLECHANGING` 那条路）。
 /// 这一条**可以**说死：新样式里确实带着 `WS_EX_TOPMOST`。
 pub static TOPMOST_STYLE_BLOCKS: AtomicU32 = AtomicU32::new(0);
+
+/// 被挡下的「把 Dock 最小化」次数（`WM_SYSCOMMAND` + `SC_MINIMIZE`）。
+///
+/// ❗为什么连最小化都要拦：Dock 没有任务栏按钮、也没有标题栏。一旦被系统收进
+/// "最小化所有窗口"（Win+M / 任务栏右键），**用户没有任何手段把它叫回来** ——
+/// 那就是"软件还在跑，但桌面上什么都没有"的假死状态。产品语义上 Dock 等同于桌面
+/// 的一部分，桌面不该被最小化，所以这条和置顶一样属于"绝不允许发生"。
+pub static MINIMIZE_BLOCKS: AtomicU32 = AtomicU32::new(0);
+
+/// 「桌面层可能被抬到 Dock 上面了」的嫌疑标记 —— 由 `desktop_watch_proc` 置上，
+/// 由自动隐藏线程在下一帧（≤16ms）消费。
+///
+/// ❗为什么钩子回调只写这一个原子变量、别的什么都不干：它是被**消息泵同步调进来的**
+/// （out-of-context 的 WinEvent 投递到调用线程的消息队列），而且事件频率不可控
+/// （一次 Win+D 会在几十毫秒里连发几十个"窗口开始最小化"）。在那里 `EnumWindows`
+/// 或写日志都会把主线程拖住。判断与动作全部留给常驻的自动隐藏线程。
+pub static DESKTOP_ABOVE_SUSPECTED: AtomicBool = AtomicBool::new(false);
 
 /// 子类化的 refdata：标记"这就是 Dock 的顶层窗口"。
 ///
@@ -120,6 +138,18 @@ unsafe extern "system" fn dock_subclass_proc(
                 }
             }
         }
+        // ---- 层级防线③：不许被最小化 ----
+        //
+        // `WM_SYSCOMMAND` 的低 4 位是系统保留的（文档要求比较前先 `& 0xFFF0`）。
+        // 直接吃掉 `SC_MINIMIZE`、**不往下传**：窗口状态根本没变过，
+        // 比"被最小化之后再还原"少一次状态抖动（还原会闪一下任务栏/焦点）。
+        //
+        // 兜底在自动隐藏线程里（每帧 `IsIconic`）——`ShowWindow(SW_MINIMIZE)`
+        // 这类不走 `WM_SYSCOMMAND` 的野路子由它收拾。
+        WM_SYSCOMMAND if is_dock_top && (wp.0 as u32 & 0xFFF0) == SC_MINIMIZE => {
+            MINIMIZE_BLOCKS.fetch_add(1, Ordering::Relaxed);
+            return LRESULT(0);
+        }
         _ => {}
     }
     DefSubclassProc(hwnd, msg, wp, lp)
@@ -149,6 +179,26 @@ pub fn sink_to_bottom(hwnd: HWND) -> bool {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
         .is_ok()
+    }
+}
+
+/// 兜底：Dock 真被最小化了就还原。
+///
+/// 主防线是窗口过程里吃掉 `SC_MINIMIZE`（见 `dock_subclass_proc`），这里管的是
+/// `ShowWindow(SW_MINIMIZE)` 这类**绕开 `WM_SYSCOMMAND`** 的路子
+/// （"最小化所有窗口"的一些实现走的就是它）。
+///
+/// ❗用 `SW_SHOWNOACTIVATE` 而不是 `SW_RESTORE`：后者会**激活**窗口，
+/// 而 Dock 的整个焦点策略就是"永不夺焦点"（见 `WM_MOUSEACTIVATE` 那条）。
+///
+/// 开销：一次 `IsIconic`（纳秒级）——所以自动隐藏线程每帧都能便宜地查一次。
+pub fn ensure_not_minimized(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        !IsIconic(hwnd).as_bool()
     }
 }
 
@@ -294,10 +344,8 @@ unsafe extern "system" fn recover_scan_cb(h: HWND, _l: LPARAM) -> BOOL {
     if !IsWindowVisible(h).as_bool() {
         return TRUE;
     }
-    let mut cls = [0u16; 64];
-    let n = GetClassNameW(h, &mut cls);
-    let class = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-    if matches!(class.as_str(), "Progman" | "WorkerW" | "SHELLDLL_DefView") {
+    // 类名判据只有一处（`is_desktop_class`），免得两处清单哪天走岔
+    if is_desktop_class(h) {
         REC_DESKTOPS.lock().unwrap().push(h.0 as isize);
     }
     TRUE
@@ -358,6 +406,186 @@ pub fn recover_if_desktop_above(dock: HWND) -> bool {
         }
     }
     sunk
+}
+
+// ------------------------------------------------- 桌面层被抬起的事件源（WinEvent）
+
+/// 事件钩子句柄（没有 `Drop`，留着只为自检能断言"钩子真的挂上了"）。
+static HOOK_FOREGROUND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static HOOK_MINIMIZE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 桌面层守护的**事件计数**（WinEvent 钩子收到了多少次、最后一次是什么）。
+///
+/// 这几个数只为"这条防线到底有没有在工作"留证据：日志里那句
+/// `[层级] 桌面层被抬到了 Dock 上方 …` 只在**真的沉了东西**时打，
+/// 而"钩子收到了事件、但扫的时候桌面还没抬起来"这种情况不会打日志 ——
+/// 没有计数就分不清"钩子没工作"和"钩子工作了但没抓到"。
+pub static HOOK_EVENT_COUNT: AtomicU32 = AtomicU32::new(0);
+/// 最后一次事件的 event id（`EVENT_SYSTEM_*`），0 = 还没有过。
+pub static HOOK_LAST_EVENT: AtomicU32 = AtomicU32::new(0);
+/// 最后一次事件的**系统时刻**（`GetTickCount` 同一时基）——用来量"事件到消费"的延迟。
+pub static HOOK_LAST_TIME: AtomicU32 = AtomicU32::new(0);
+
+/// 桌面系窗口的三个类名：`Progman`（桌面本体）/ `WorkerW`（壁纸宿主）/ `SHELLDLL_DefView`（图标层）。
+pub const DESKTOP_CLASSES: [&str; 3] = ["Progman", "WorkerW", "SHELLDLL_DefView"];
+
+/// 取窗口类名（64 字符足够：桌面系与我们要判别的类名都短）。
+pub fn class_of(hwnd: HWND) -> String {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// 这个窗口是不是桌面系窗口（`Progman` / `WorkerW` / `SHELLDLL_DefView`）。
+pub fn is_desktop_class(hwnd: HWND) -> bool {
+    !hwnd.0.is_null() && DESKTOP_CLASSES.contains(&class_of(hwnd).as_str())
+}
+
+/// 「桌面层被抬起」的事件处理：置标记 + 记事件号与时刻。
+fn note_desktop_event(event: u32) {
+    DESKTOP_ABOVE_SUSPECTED.store(true, Ordering::SeqCst);
+    HOOK_LAST_EVENT.store(event, Ordering::SeqCst);
+    HOOK_LAST_TIME.store(
+        unsafe { windows::Win32::System::SystemInformation::GetTickCount() },
+        Ordering::SeqCst,
+    );
+    HOOK_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// `SetWinEventHook` 的回调。**只置一个原子标记 + 记两个数**，别的什么都不干
+/// （理由见 `DESKTOP_ABOVE_SUSPECTED` 的注释：这里是消息泵的调用栈）。
+unsafe extern "system" fn desktop_watch_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _idobject: i32,
+    _idchild: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    match event {
+        // Win+D / 任务栏最右角"显示桌面" / Win+M：一整批窗口开始（或结束）最小化。
+        // 这就是"桌面层被抬到最前"的**前兆**——shell 先最小化、再把桌面抬起来。
+        EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND => note_desktop_event(event),
+        // 前台换成了桌面（点桌面、Win+D 的另一半）。只认桌面系类名：
+        // 否则每切一次窗口都要白扫一遍 Z 序。
+        EVENT_SYSTEM_FOREGROUND if is_desktop_class(hwnd) => note_desktop_event(event),
+        _ => {}
+    }
+}
+
+/// 装「桌面层被抬起」的事件钩子 —— 把"桌面盖住 Dock"的发现时间从**最长 2 秒**
+/// 压到**一帧（≤16ms）**。
+///
+/// # 为什么需要它（2026-09 用户实测）
+///
+/// "在桌面按 Win+D，Dock 就藏起来了"。实测（100ms 采样）：按下去之后 `Progman`
+/// **当帧**就从 Z 序第 116 位跳到第 16 位（= 桌面盖在 Dock 上面），而当时的修法是
+/// **每 2 秒**才扫一次 Z 序 —— 于是 Dock 有整整 1.7 秒是"消失"的。
+///
+/// 桌面是 Win+D 的主角，`Shell` 抬它这件事本身拦不住（我们只能改自己窗口的 Z 序，
+/// 而按不变式，Dock 的 Z 序一次都不许动）。所以改成"抬起来就立刻按回去"：
+/// 事件当帧置标记 → 自动隐藏线程下一帧把**桌面**沉回 Dock 下方（Dock 自己依旧不动）。
+///
+/// 顺带覆盖：点桌面、explorer 重启、壁纸软件（Wallpaper Engine 之类）重排桌面层。
+///
+/// ❗**必须在有消息泵的线程上调用**：out-of-context 的事件是投递到**调用线程的
+/// 消息队列**里的 —— 自动隐藏线程是 `sleep` 循环、不抽消息，装在那里等于没装。
+pub fn install_desktop_watch() -> (bool, isize) {
+    // 排查 / 自检用：`DOCK_NO_WINEVENT=1` 关掉事件钩子，只留"每帧前台轮询 + 500ms 兜底"。
+    // 有了它才能**分别**证明两条触发链各自有效（否则事件那条路会把前台的功劳遮住）。
+    if std::env::var("DOCK_NO_WINEVENT").as_deref() == Ok("1") {
+        return (false, 0);
+    }
+    unsafe {
+        // ⚠️ 两把钩子而不是一把范围钩子：`EVENT_SYSTEM_FOREGROUND`(3) 到
+        // `EVENT_SYSTEM_MINIMIZESTART`(22) 之间夹着十几种高频事件
+        // （菜单弹出、对话框、滚动、移动尺寸…），挂成一个大范围就等于每次弹菜单
+        // 都白扫一遍 Z 序。分开挂，语义也清楚。
+        let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+        let fg = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(desktop_watch_proc),
+            0,
+            0,
+            flags,
+        );
+        let mn = SetWinEventHook(
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
+            None,
+            Some(desktop_watch_proc),
+            0,
+            0,
+            flags,
+        );
+        HOOK_FOREGROUND.store(fg.0 as isize, Ordering::SeqCst);
+        HOOK_MINIMIZE.store(mn.0 as isize, Ordering::SeqCst);
+        (!fg.0.is_null() && !mn.0.is_null(), fg.0 as isize)
+    }
+}
+
+/// 自检用：两把事件钩子的句柄（0 = 没装上）。
+pub fn desktop_watch_handles() -> (isize, isize) {
+    (
+        HOOK_FOREGROUND.load(Ordering::SeqCst),
+        HOOK_MINIMIZE.load(Ordering::SeqCst),
+    )
+}
+
+/// 自检 / 日志用：`(事件总数, 最后一次的 event id, 最后一次的系统时刻)`。
+pub fn desktop_watch_stats() -> (u32, u32, u32) {
+    (
+        HOOK_EVENT_COUNT.load(Ordering::Relaxed),
+        HOOK_LAST_EVENT.load(Ordering::Relaxed),
+        HOOK_LAST_TIME.load(Ordering::Relaxed),
+    )
+}
+
+/// 「前台窗口是不是桌面系」——自动隐藏线程每帧问一次（见 `reveal` 的桌面层守卫）。
+///
+/// ❗为什么除了 WinEvent 钩子还要自己轮询：实测（2026-09）`Win+D` 确实会发
+/// `EVENT_SYSTEM_MINIMIZESTART` 与 `EVENT_SYSTEM_FOREGROUND(Progman)`，但**投递到
+/// 消息泵的时机**不由我们决定 —— 而 `GetForegroundWindow()` 只要几十纳秒，
+/// 每帧比一次"前台句柄变了吗"，变了且是桌面系就开扫。这条路的延迟是**确定的一帧**。
+pub fn foreground_is_desktop() -> bool {
+    unsafe { is_desktop_class(GetForegroundWindow()) }
+}
+
+/// **点探测**：Dock 正中心那个点上，现在是不是一个桌面系窗口（= 桌面压住了 Dock）。
+///
+/// # 为什么要有这条（这是四条触发源里唯一"当帧必定成立"的一条）
+///
+/// 2026-09 实测：`Win+D` 时**两条信号都不可靠** ——
+/// 日志里 `守卫事件累计 0 次`（WinEvent 没送到），前台也没变成桌面系窗口；
+/// 结果整条防线只剩 500ms 兜底，用户看到桌面盖住 Dock 100~240ms。
+///
+/// 而"桌面压住 Dock"这个状态本身，有一个**当帧就能问、且必然为真**的判据：
+/// 桌面是**全屏窗口**，它一旦压到 Dock 上面，Dock 矩形中心那个点就被它接管 ——
+/// `WindowFromPoint` 会直接告诉我们。只看"压在上面的是不是桌面系窗口"，
+/// 所以应用窗口正常盖住 Dock（用户日常）时**不会**误触发。
+///
+/// 成本：`WindowFromPoint` + `GetAncestor` + 类名比较，实测见文档
+/// （60Hz 下占比可忽略）。自动隐藏时窗口在屏幕外，中心点也在屏幕外，
+/// `WindowFromPoint` 返回空 → 自然为 false，不需要任何状态耦合。
+pub fn desktop_covers_dock_center(hwnd: HWND) -> bool {
+    let r = window_rect(hwnd);
+    if r.right <= r.left || r.bottom <= r.top {
+        return false;
+    }
+    let p = POINT {
+        x: (r.left + r.right) / 2,
+        y: (r.top + r.bottom) / 2,
+    };
+    unsafe {
+        let h = WindowFromPoint(p);
+        if h.0.is_null() {
+            return false;
+        }
+        is_desktop_class(GetAncestor(h, GA_ROOT))
+    }
 }
 
 /// 系统 DPI（日志会话头用；窗口的 DPI 用 `dpi_of`）

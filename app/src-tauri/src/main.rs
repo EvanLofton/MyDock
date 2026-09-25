@@ -485,6 +485,15 @@ fn setup_window_layer(app: &tauri::AppHandle, hwnd: HWND) {
     let icc = win_layer::init_common_controls();
     let (hooked, total) = win_layer::install_mouseactivate_hook_tree(hwnd);
 
+    // 2.5 桌面层守护的**事件源**：Win+D（显示桌面）会把桌面抬到 Dock 上面。
+    //
+    //     ❗必须在这里（主线程）装：out-of-context 的 WinEvent 是投递到**调用线程的
+    //     消息队列**里的，而这个线程正是 tao 的消息泵。装到自动隐藏线程（sleep 循环）
+    //     上等于没装。
+    //     回调只置一个原子标记，真正的 Z 序扫描在自动隐藏线程里做（那里没有 UI 线程
+    //     该干的活），见 `reveal::run` 的"桌面层守卫"。
+    let (watch_ok, _watch_hook) = win_layer::install_desktop_watch();
+
     // 3. 亚克力 + 窗口材质（DWM 圆角 / 无边框 / 深色）
     let glass = glass::apply_acrylic(
         hwnd,
@@ -536,6 +545,13 @@ fn setup_window_layer(app: &tauri::AppHandle, hwnd: HWND) {
     log_info!(
         "  层级      沉底={}（桌面之上、普通窗口之下；之后任何 Z 序变更都会被钩子拦掉）",
         if sunk { "成功" } else { "**失败**" }
+    );
+    let (wh_fg, wh_mn) = win_layer::desktop_watch_handles();
+    log_info!(
+        "  桌面守护  WinEvent 钩子 {}{}（前台={wh_fg:#x} 最小化={wh_mn:#x}）：Win+D/点桌面把桌面抬起来 → 当帧沉回；\
+         被最小化 → 立刻还原",
+        if watch_ok { "已装" } else { "**未装上**" },
+        if watch_ok { "" } else { "（退回前台轮询 + 500ms 兜底）" },
     );
     log_info!(
         "  毛玻璃    {glass}  rgba=({},{},{},{})",

@@ -25,6 +25,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
+    # `SetWinEventHook`：Win+D（显示桌面）会把**桌面层抬到最前**，于是盖住 Dock。
+    # 这个钩子让"桌面被抬起"这件事**当帧**就知道（原来靠 2 秒一次的轮询，用户看到
+    # 的就是"按 Win+D 之后 Dock 没了"）。⚠️ 钩子函数在这里，事件常量却挂在
+    # `Win32_UI_WindowsAndMessaging` 上（`EVENT_SYSTEM_*` / `WINEVENT_OUTOFCONTEXT`）。
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

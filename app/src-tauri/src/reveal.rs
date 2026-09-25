@@ -31,6 +31,13 @@ static PAUSE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 /// （线程每帧都会读，不需要重启）。
 pub static ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// 「把桌面沉回 Dock 下方」成功了多少次。
+///
+/// 这是桌面层守卫**真的动过手**的证据 —— 日志那句 `[层级] 桌面层被抬到了…` 会被限流，
+/// 自检也没法读日志，所以留一个计数器（自检 ⑦ 断言它涨了，才说明"守卫发现了并处理了"，
+/// 而不是"这次抬起根本没发生"）。
+pub static DESKTOP_SINKS: AtomicUsize = AtomicUsize::new(0);
+
 pub fn pause() {
     PAUSE_DEPTH.fetch_add(1, Ordering::SeqCst);
 }
@@ -94,6 +101,30 @@ fn ease_out_cubic(t: f64) -> f64 {
 fn ease_in_quad(t: f64) -> f64 {
     t * t
 }
+
+/// 「桌面层被抬起」事件触发后**连扫**的帧数（62.5Hz → 62 帧 ≈ 1 秒）。
+///
+/// ❗事件和"桌面真的压到 Dock 上面"不是同一时刻：shell 先最小化窗口 / 先切前台，
+/// 再改 Z 序，中间隔着几十到几百毫秒（实测"最小化事件"比"桌面被抬起来"早约 90ms）。
+/// 第一版这个数是 20 帧（320ms），实测**不够**：A/B 对照里"有事件钩子"反而比
+/// "只靠前台轮询"更差（最坏 260ms vs 0ms）—— 事件太早到，把连扫窗口在桌面抬起之前
+/// 就用完了。所以这里必须覆盖整个 shell 动画期，而不是"够长就行"。
+const WATCH_TICKS: u32 = 62;
+
+/// 把桌面沉下去之后**再连扫**的帧数（≈384ms）：实测 shell 会在动画期间**反复**抬它
+/// （我们沉一次、它抬一次），只跟一帧是不够的。
+const FOLLOWUP_TICKS: u32 = 24;
+
+/// 没有事件时的兜底扫描间隔（62.5Hz → 31 帧 ≈ 500ms）。
+///
+/// 成本实测：一次 `EnumWindows` + 类名判断（约 150 个顶层窗口）≈ **25µs**，
+/// 500ms 一次 = **0.005% 单核**。原来这个数是 2 秒 —— 那是用户看到"Win+D 之后
+/// Dock 消失 1.7 秒"的直接原因，现在事件负责毫秒级、兜底只负责漏网的。
+const FALLBACK_TICKS: u32 = 31;
+
+/// 「桌面被抬起来了」这条日志的限流间隔 —— 万一 shell 进入"抬—沉"循环，
+/// 62.5Hz 的日志会瞬间把 8MB 的日志文件刷满。
+const LOG_THROTTLE: Duration = Duration::from_secs(5);
 
 fn cursor() -> POINT {
     let mut p = POINT::default();
@@ -230,9 +261,20 @@ fn run(hwnd: HWND, p: RevealParams) {
     let mut cooldown_until = Instant::now();
     // 兜底体检的帧计数（62.5Hz → 312 帧 ≈ 5 秒，见 clear_topmost_if_set）
     let mut tick: u32 = 0;
+    // 桌面层守卫：事件触发后的连扫剩余帧数（见 WATCH_TICKS），以及日志限流时刻
+    let mut watch_ticks: u32 = 0;
+    let mut last_desktop_log: Option<Instant> = None;
     // 上次报告过的拦截次数（见下：钩子不做 I/O，日志由这里代打）
     let mut reported_z: u32 = 0;
     let mut reported_s: u32 = 0;
+    let mut reported_ev: u32 = 0;
+    let mut reported_sinks: u32 = 0;
+    // 上一次看到的**前台窗口**（桌面层守卫用；见下面的"前台轮询"）
+    let mut last_foreground: isize = 0;
+    // `DOCK_DEBUG=1` 时把守卫的开扫/扫描结果逐帧打出来（排查用，平时不输出）
+    let debug_desktop = std::env::var("DOCK_DEBUG").as_deref() == Ok("1");
+    // 本次连扫是**哪条触发源**开的（写进日志：四条路各自都能单独失灵，说清楚才好排查）
+    let mut trigger = String::new();
 
     log_info!(
         "[自动隐藏] 线程已启动：触发区 {}px 延迟 {}ms（当前{}）",
@@ -248,13 +290,26 @@ fn run(hwnd: HWND, p: RevealParams) {
         // 同步调进来的调用栈，见 `win_layer::ZORDER_BLOCKS` / `TOPMOST_STYLE_BLOCKS`）。
         let z = win_layer::ZORDER_BLOCKS.load(Ordering::Relaxed);
         let s = win_layer::TOPMOST_STYLE_BLOCKS.load(Ordering::Relaxed);
-        if z != reported_z || s != reported_s {
+        // 事件计数也一起报：没有它就分不清"钩子没工作"和"钩子工作了但没抓到"
+        let (ev_count, ev_last, _ev_time) = win_layer::desktop_watch_stats();
+        let sinks = DESKTOP_SINKS.load(Ordering::Relaxed) as u32;
+        if z != reported_z || s != reported_s || ev_count != reported_ev || sinks != reported_sinks {
             log_info!(
-                "[层级] 已挡下对 Dock 的 Z 序变更 {z} 次、直接的置顶样式 {s} 次 —— \
-                 它固定在桌面那一层（顺带：tao 自己也会发 NOTOPMOST，那种也算在 Z 序里）"
+                "[层级] 已挡下对 Dock 的 Z 序变更 {z} 次、直接的置顶样式 {s} 次、最小化 {m} 次、\
+                 桌面沉回 {sinks} 次 —— 它固定在桌面那一层\
+                 （顺带：tao 自己也会发 NOTOPMOST，那种也算在 Z 序里）",
+                m = win_layer::MINIMIZE_BLOCKS.load(Ordering::Relaxed)
             );
+            if ev_count != reported_ev {
+                log_info!(
+                    "[层级] 桌面守卫事件：累计 {ev_count} 次，最后一次 event=0x{ev_last:04X}\
+                     （0x0003=前台变成桌面，0x0016/0x0017=窗口开始/结束最小化）"
+                );
+                reported_ev = ev_count;
+            }
             reported_z = z;
             reported_s = s;
+            reported_sinks = sinks;
         }
 
         // 兜底体检（主防线是上面那两条消息钩子，这里只管野路子）。
@@ -264,14 +319,107 @@ fn run(hwnd: HWND, p: RevealParams) {
             clear_topmost_if_set(hwnd);
         }
 
-        // 桌面窗口跑到 Dock **上面** = Dock 被壁纸盖住（典型成因：explorer 重启后
-        // shell 重建桌面窗口）。修法是**把那些桌面窗口沉下去**，Dock 自己的 Z 序一次都不动 ——
-        // 所以"永不上升"依旧是绝对不变式，钩子也不需要任何旁路。
+        // 最小化自愈：`SC_MINIMIZE` 已在窗口过程里被吃掉，这里管绕开 `WM_SYSCOMMAND`
+        // 的路子（`ShowWindow(SW_MINIMIZE)`）。一次 `IsIconic` 而已，所以每帧查。
+        if win_layer::ensure_not_minimized(hwnd) {
+            log_warn!("[层级] Dock 被系统最小化了（Win+M / 最小化所有窗口）—— 已还原到桌面层");
+            // 位置/显示状态都由本循环管，还原之后让它重新决策
+            visible = false;
+            y = hidden_top();
+            applied = None;
+        }
+
+        // ---- 桌面层守卫（"Win+D 之后 Dock 不见了"就死在这里）----
         //
-        // 每 2 秒扫一次 Z 序（约 150 个顶层窗口 + 类名判断，微秒级）：
-        // 出事后 Dock 最多被盖住两秒就自己回来。
-        if tick % 124 == 0 && win_layer::recover_if_desktop_above(hwnd) {
-            log_warn!("[层级] 桌面窗口跑到了 Dock 上面（多半是 explorer 重启）—— 已把桌面沉回 Dock 下方");
+        // 触发源有两类：
+        //   ① **事件**（`win_layer::install_desktop_watch`）：前台变成桌面、或有窗口开始/结束
+        //      最小化 —— Win+D 就是这个动作。回调只置一个原子标记，消费在这里。
+        //   ② **兜底**：每 ~500ms 无条件扫一遍，覆盖钩子抓不到的路子（explorer 重启等）。
+        //
+        // 修法永远是**把桌面沉下去**，Dock 自己的 Z 序一次都不动（见
+        // `win_layer::recover_if_desktop_above` 里的取舍说明）。
+        //
+        // ⚠️ 事件到了、桌面**还没**抬起来是正常时序（shell 先切前台/最小化窗口，再改 Z 序），
+        // 所以事件触发后要**连扫若干帧**，而不是扫一次就完事 —— 扫一次会正好错过。
+        //
+        // 触发源有四条，前三条各自都可能失灵（实测都失灵过），所以都要：
+        //   ① **点探测**（每帧问"Dock 正中心现在被谁占着"，是桌面系就开扫）——
+        //      唯一"当帧必定成立"的一条：桌面是全屏窗口，压上来必然接管那个点。
+        //      2026-09 实测：`Win+D` 时 WinEvent 没送到、前台也没变成桌面系，
+        //      整条防线只剩 500ms 兜底（用户看到桌面盖住 Dock 100~240ms）。这条补的就是它；
+        //   ② **前台轮询**（`GetForegroundWindow` + 只在句柄变化时比类名）：
+        //      点桌面、`Win+D` 的另一半会让前台变成桌面系；
+        //   ③ **WinEvent 钩子**：`Win+D` 实测会发 `EVENT_SYSTEM_MINIMIZESTART`
+        //      （比"桌面被抬起来"更早），送到时就是当帧；
+        //   ④ 500ms 兜底轮询（explorer 重启等既无前台变化、点也没被接管的极端情况）。
+        if win_layer::desktop_covers_dock_center(hwnd) {
+            watch_ticks = WATCH_TICKS;
+            trigger = "点探测：Dock 中心点被桌面系窗口接管".to_string();
+            if debug_desktop {
+                log_debug!("[守卫调试] 开扫：Dock 中心点被桌面系窗口接管（{WATCH_TICKS} 帧）");
+            }
+        }
+        let fg = unsafe { GetForegroundWindow().0 as isize };
+        if fg != last_foreground {
+            let first = last_foreground == 0;
+            last_foreground = fg;
+            // 首次只记账、不触发（启动那一刻前台是什么都不该开扫）
+            if !first && win_layer::foreground_is_desktop() {
+                watch_ticks = WATCH_TICKS;
+                trigger = "前台窗口变成了桌面".to_string();
+                if debug_desktop {
+                    log_debug!("[守卫调试] 开扫：前台变成桌面（{WATCH_TICKS} 帧）");
+                }
+            }
+        }
+        if win_layer::DESKTOP_ABOVE_SUSPECTED.swap(false, Ordering::SeqCst) {
+            watch_ticks = WATCH_TICKS;
+            let (c, e, _) = win_layer::desktop_watch_stats();
+            trigger = format!("WinEvent 0x{e:04X}（累计 {c} 次）");
+            if debug_desktop {
+                log_debug!("[守卫调试] 开扫：{trigger}（{WATCH_TICKS} 帧）");
+            }
+        }
+        if watch_ticks > 0 {
+            watch_ticks -= 1;
+        }
+        if watch_ticks > 0 || tick % FALLBACK_TICKS == 0 {
+            let sunk = win_layer::recover_if_desktop_above(hwnd);
+            if debug_desktop {
+                log_debug!(
+                    "[守卫调试] 扫描 tick={tick} 连扫剩余={watch_ticks} 兜底={} → {}",
+                    tick % FALLBACK_TICKS == 0,
+                    if sunk { "发现桌面在上，已沉回" } else { "干净" }
+                );
+            }
+            if sunk {
+                DESKTOP_SINKS.fetch_add(1, Ordering::SeqCst);
+                // 沉完再连扫几帧：shell 有时会在几十毫秒内**再抬一次**（实测 4 秒内连抬两次）
+                watch_ticks = watch_ticks.max(FOLLOWUP_TICKS);
+                // 限流：万一 shell 进入"抬—沉"循环，别把日志刷爆
+                if debug_desktop
+                    || last_desktop_log.map_or(true, |t: Instant| t.elapsed() >= LOG_THROTTLE)
+                {
+                    // ❗触发源要说实话：第一版按"有没有 WinEvent"二分，于是点探测/前台
+                    // 轮询抓到的那次被写成"由 500ms 兜底轮询发现"（实测日志里看到才发现）。
+                    let how = if trigger.is_empty() {
+                        "500ms 兜底轮询发现".to_string()
+                    } else if trigger.starts_with("WinEvent") {
+                        let (_, _, ev_time) = win_layer::desktop_watch_stats();
+                        let latency =
+                            unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
+                                .wrapping_sub(ev_time);
+                        format!("{trigger}，事件→沉回 {latency}ms")
+                    } else {
+                        trigger.clone()
+                    };
+                    log_warn!(
+                        "[层级] 桌面层被抬到了 Dock 上方（Win+D/显示桌面、点桌面、explorer 重启都会这样）\
+                         —— 已把桌面沉回 Dock 下方（{how}）"
+                    );
+                    last_desktop_log = Some(Instant::now());
+                }
+            }
         }
 
         // 心跳：每 5 分钟一行（62.5Hz → 18750 帧）。
