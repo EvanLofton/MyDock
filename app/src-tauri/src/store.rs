@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -850,8 +850,89 @@ pub fn set_launch_at_login(app: &AppHandle, want: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 旧 identifier 的**一次性数据迁移**（2026-09 改名 `dev.local.dock` → 现在这个时加的）。
+///
+/// 改名会同时挪动三个位置，缺一个老用户就会觉得"东西丢了"：
+///   1. 配置：`%APPDATA%\dev.local.dock\config.json` → `%APPDATA%\<新 id>\config.json`
+///      —— 不迁的话升级上来是**空 Dock**；
+///   2. 临时文件夹：`%LOCALAPPDATA%\dev.local.dock\临时文件` → `%LOCALAPPDATA%\<新 id>\临时文件`
+///      —— 里面可能有用户放的文件，**复制**过去（不是 move：老实例可能还在跑，
+///      突然把目录搬走会让它点开一个不存在的路径）；
+///   3. 日志：**不迁**。老日志留在老目录里，新日志写新目录（路径写在日志会话头里，
+///      出事时看托盘「打开日志目录」给的那个位置就行）。
+///
+/// 只在"新位置还没有、旧位置有"时动手 —— 幂等，重复启动无副作用。
+/// `DOCK_CONFIG_DIR` 存在时整体跳过：那是自检/沙箱，跑在配置副本上，
+/// 不该动用户的真实数据。
+pub fn migrate_old_identifier(app: &AppHandle) {
+    if std::env::var("DOCK_CONFIG_DIR").is_ok() {
+        return;
+    }
+
+    // ① 配置
+    let new_cfg = config_path(app);
+    if !new_cfg.exists() {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let old = PathBuf::from(&appdata)
+                .join(crate::OLD_IDENTIFIER)
+                .join("config.json");
+            if old.exists() {
+                if let Some(dir) = new_cfg.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                match std::fs::copy(&old, &new_cfg) {
+                    Ok(_) => log_info!(
+                        "[迁移] 旧标识符的配置已搬到新位置：{} → {}",
+                        old.display(),
+                        new_cfg.display()
+                    ),
+                    Err(e) => log_warn!("[迁移] 复制旧配置失败（照常使用默认值）: {e}"),
+                }
+            }
+        }
+    }
+
+    // ② 临时文件夹（复制，不搬走）
+    if let Ok(new_tmp) = crate::apps::temp_folder_path() {
+        if !new_tmp.exists() {
+            if let Ok(la) = std::env::var("LOCALAPPDATA") {
+                let old_tmp = PathBuf::from(&la).join(crate::OLD_IDENTIFIER).join("临时文件");
+                if old_tmp.is_dir() {
+                    match copy_dir(&old_tmp, &new_tmp) {
+                        Ok(n) => log_info!(
+                            "[迁移] 临时文件夹已复制到新位置（{n} 个文件）：{}",
+                            new_tmp.display()
+                        ),
+                        Err(e) => log_warn!("[迁移] 临时文件夹复制失败（老目录原样留着）: {e}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 递归复制目录（只用于上面那次一次性迁移；不做符号链接、权限继承等花活）。
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut n = 0usize;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            n += copy_dir(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// 读取配置。文件不存在或解析失败一律退回默认值 —— 配置坏了不应该让程序起不来。
 pub fn load(app: &AppHandle) -> Preferences {
+    // 先做旧标识符的一次性迁移（幂等），再读配置
+    migrate_old_identifier(app);
     let p = config_path(app);
     match std::fs::read_to_string(&p) {
         Ok(s) => match serde_json::from_str::<Preferences>(&s) {

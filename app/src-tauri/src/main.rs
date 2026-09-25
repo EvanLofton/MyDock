@@ -25,6 +25,19 @@
 // 这样各个文件里只管写 `log_info!(...)`，不必逐个 `use`。
 #[macro_use]
 mod logging;
+
+/// 应用标识符（**必须与 `tauri.conf.json` 的 `identifier` 完全一致**）。
+///
+/// 为什么在 Rust 里也留一份：日志目录是**在 Tauri 起来之前**就要打开的
+/// （早开日志才能记下启动阶段的问题），那时候还没有 `AppHandle` 可以问
+/// `app.path()`。配置目录不在这里 —— 它走 `app.path().app_config_dir()`，
+/// 自动跟随 identifier。
+///
+/// 单测 `logging::tests::identifier_matches_tauri_conf` 会比对这两个值，防止漂移。
+pub const IDENTIFIER: &str = "io.github.evanlofton.mydock";
+
+/// 改名前的标识符（`dev.local.dock` → 现在这个）。只用于**一次性数据迁移**。
+pub const OLD_IDENTIFIER: &str = "dev.local.dock";
 mod apps;
 mod autostart;
 mod commands;

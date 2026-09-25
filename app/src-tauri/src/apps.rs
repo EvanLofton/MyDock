@@ -621,7 +621,7 @@ pub fn empty_recycle_bin() -> Result<(), String> {
     }
 }
 
-/// Dock 用的**临时文件夹**路径（`%LOCALAPPDATA%\dev.local.dock\临时文件`），需要时创建。
+/// Dock 用的**临时文件夹**路径（`%LOCALAPPDATA%\<identifier>\临时文件`），需要时创建。
 ///
 /// 为什么放 LocalAppData 而不是"文档"或 %TEMP%：
 /// - 放"文档"会往用户的资料目录里塞东西；
@@ -629,6 +629,9 @@ pub fn empty_recycle_bin() -> Result<(), String> {
 /// - 这里是"应用自己管的一块地"，跟着 Dock 的标识符走，卸载时一起删才合理。
 ///
 /// 名字用中文是为了让用户在资源管理器里一眼认出来（它会被打开给用户看）。
+///
+/// ⚠️ 标识符改过一次（`dev.local.dock` → 现在这个），老目录由
+/// `store::migrate_old_identifier` 一次性搬过来 —— 里面可能有用户放的文件，不能丢。
 pub fn temp_folder_path() -> Result<std::path::PathBuf, String> {
     use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
@@ -642,7 +645,7 @@ pub fn temp_folder_path() -> Result<std::path::PathBuf, String> {
         windows::Win32::System::Com::CoTaskMemFree(Some(raw.0 as *const core::ffi::c_void));
     }
     Ok(std::path::Path::new(&base)
-        .join("dev.local.dock")
+        .join(crate::IDENTIFIER)
         .join("临时文件"))
 }
 

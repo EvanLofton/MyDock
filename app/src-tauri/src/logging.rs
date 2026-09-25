@@ -25,7 +25,7 @@
 //! # 文件与轮转
 //!
 //! - 目录：`DOCK_LOG_DIR` > `DOCK_CONFIG_DIR/logs`（自检时跟配置走，互不干扰）
-//!   > `%LOCALAPPDATA%\dev.local.dock\logs`；
+//!   > `%LOCALAPPDATA%\<identifier>\logs`（identifier 见 `main.rs` 的 `IDENTIFIER`）；
 //! - 日志：`dock-YYYY-MM-DD.log`，**按天**一个文件；单文件超 [`MAX_LOG_BYTES`] 就轮转成
 //!   `.1.log`（只留一代，避免无限长）；保留最近 [`KEEP_DAYS`] 天；
 //! - 崩溃：`crash-YYYYMMDD-HHMMSS.txt` + `.dmp`，保留最近 [`KEEP_CRASHES`] 份。
@@ -199,7 +199,7 @@ pub fn log_dir() -> PathBuf {
     }
     if let Ok(la) = std::env::var("LOCALAPPDATA") {
         if !la.trim().is_empty() {
-            return PathBuf::from(la).join("dev.local.dock").join("logs");
+            return PathBuf::from(la).join(crate::IDENTIFIER).join("logs");
         }
     }
     std::env::current_exe()
@@ -758,3 +758,26 @@ pub fn maybe_crash_for_test() {
 
 #[cfg(not(debug_assertions))]
 pub fn maybe_crash_for_test() {}
+
+#[cfg(test)]
+mod tests {
+    /// `crate::IDENTIFIER` 与 `tauri.conf.json` 的 identifier **必须一致** ——
+    /// 日志目录靠前者，配置/WebView 数据目录靠后者，不一致就会出现"日志在一个目录、
+    /// 配置在另一个目录"这种极难查的问题。
+    #[test]
+    fn identifier_matches_tauri_conf() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 解析失败");
+        assert_eq!(
+            conf["identifier"].as_str().unwrap_or_default(),
+            crate::IDENTIFIER,
+            "tauri.conf.json 的 identifier 与 main.rs 的 IDENTIFIER 必须一致"
+        );
+    }
+
+    /// 旧标识符的目录名别写错（迁移靠它）
+    #[test]
+    fn old_identifier_is_the_legacy_one() {
+        assert_eq!(crate::OLD_IDENTIFIER, "dev.local.dock");
+    }
+}
