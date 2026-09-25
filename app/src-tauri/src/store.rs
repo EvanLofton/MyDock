@@ -892,7 +892,22 @@ pub fn migrate_old_identifier(app: &AppHandle) {
         }
     }
 
-    // ② 临时文件夹（复制，不搬走）
+    // ② 配置里**指向老目录的路径**要改到新位置。
+    //
+    // ❗这一步必须独立于上面的"复制"、每次都跑（幂等）：因为老路径可能已经
+    // 通过一次迁移进了新配置文件里。实测踩到的后果：配置里那条「临时文件夹」
+    // 还指着 `…\dev.local.dock\临时文件`，而 `add_temp_folder` 按 **target**
+    // 判断"在不在" → 找不到 → 又加了一条 → Dock 上出现两个临时文件夹
+    //（自检的「测试结束后列表已还原」就是这么红的：29 项变 30 项）。
+    if let Ok(la) = std::env::var("LOCALAPPDATA") {
+        rewrite_old_paths(
+            &config_path(app),
+            &PathBuf::from(&la).join(crate::OLD_IDENTIFIER),
+            &PathBuf::from(&la).join(crate::IDENTIFIER),
+        );
+    }
+
+    // ③ 临时文件夹（复制，不搬走）
     if let Ok(new_tmp) = crate::apps::temp_folder_path() {
         if !new_tmp.exists() {
             if let Ok(la) = std::env::var("LOCALAPPDATA") {
@@ -907,6 +922,71 @@ pub fn migrate_old_identifier(app: &AppHandle) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 把配置里所有以 `old_prefix` 开头的 `target` 改成 `new_prefix`（含文件夹里的子项）。
+///
+/// 走 JSON 解析而不是字符串替换：配置文件里的路径是**转义过**的
+/// （`C:\\Users\\…`），直接对原文做 replace 一定匹配不上。
+fn rewrite_old_paths(cfg: &Path, old_prefix: &Path, new_prefix: &Path) {
+    let Ok(text) = std::fs::read_to_string(cfg) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let old_s = old_prefix.to_string_lossy().to_string();
+    let new_s = new_prefix.to_string_lossy().to_string();
+    let mut changed = 0u32;
+    if let Some(pinned) = v.get_mut("pinned").and_then(|p| p.as_array_mut()) {
+        fix_targets(pinned, &old_s, &new_s, &mut changed);
+    }
+    if changed == 0 {
+        return;
+    }
+    match serde_json::to_string_pretty(&v) {
+        Ok(out) => match std::fs::write(cfg, out) {
+            Ok(_) => log_info!(
+                "[迁移] 配置里 {changed} 条指向老目录的路径已改到新位置（{}）",
+                new_prefix.display()
+            ),
+            Err(e) => log_warn!("[迁移] 写回配置失败: {e}"),
+        },
+        Err(e) => log_warn!("[迁移] 配置序列化失败: {e}"),
+    }
+}
+
+fn fix_targets(items: &mut [serde_json::Value], old: &str, new: &str, n: &mut u32) {
+    let old_lower = old.to_lowercase();
+    for item in items.iter_mut() {
+        let target = item
+            .get("target")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let id = item
+            .get("id")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if target.starts_with(old) {
+            // ① target 指着老目录 → 改到新目录，并按新 target 重算 id
+            let replaced = target.replacen(old, new, 1);
+            item["id"] = serde_json::Value::String(crate::apps::id_for_target(&replaced));
+            item["target"] = serde_json::Value::String(replaced);
+            *n += 1;
+        } else if id.starts_with(&old_lower) && !target.is_empty() {
+            // ② 补漏：早期版本只改了 target、没动 id，于是留下 `id != id_for_target(target)`
+            //    的条目（全项目的约定是二者自洽）。这里按 target 重算一次 —— 幂等。
+            item["id"] = serde_json::Value::String(crate::apps::id_for_target(&target));
+            *n += 1;
+        }
+
+        if let Some(children) = item.get_mut("children").and_then(|c| c.as_array_mut()) {
+            fix_targets(children, old, new, n);
         }
     }
 }

@@ -22,7 +22,23 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $exe = Join-Path $root "app\src-tauri\target\debug\dock-app.exe"
 $cfgDir = Join-Path $root ".selftest-cfg"
-$real = Join-Path $env:APPDATA "dev.local.dock\config.json"
+$real = Join-Path $env:APPDATA "io.github.evanlofton.mydock\config.json"
+# ⚠️ 配置路径要从 tauri.conf.json 的 identifier 推导，**不要写死** ——
+# 改 identifier 那一轮就踩过：脚本还在读旧 identifier 的配置，于是自检测的是另一份
+# 数据（那份里的临时文件夹指向老目录），报出"测试结束后列表未还原"这种**假失败**。
+$confPath = Join-Path $root "app\src-tauri\tauri.conf.json"
+if (Test-Path $confPath) {
+  $ident = (Get-Content $confPath -Raw -Encoding UTF8 | ConvertFrom-Json).identifier
+  if ($ident) { $real = Join-Path $env:APPDATA "$ident\config.json" }
+}
+if (-not (Test-Path $real)) {
+  # 新版还没跑过（没迁移过）→ 退回旧 identifier 的配置，别让闸直接罢工
+  $legacy = Join-Path $env:APPDATA "dev.local.dock\config.json"
+  if (Test-Path $legacy) {
+    Write-Host "（新版配置还不存在，先用旧 identifier 的：$legacy）" -ForegroundColor DarkGray
+    $real = $legacy
+  }
+}
 
 if (-not (Test-Path $real)) { Write-Host "找不到真实配置 $real" -ForegroundColor Red; exit 1 }
 
