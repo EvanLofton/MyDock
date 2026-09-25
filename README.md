@@ -1,7 +1,14 @@
 # Dock —— Windows 11 上的 macOS 风格程序坞
 
+<img src="docs/images/icon.png" width="96" align="right" alt="应用图标">
+
+![Dock 截图](docs/images/dock.png)
+
 一个常驻桌面的 Dock：底部悬浮、毛玻璃、悬停鱼眼放大、点击启动/切换应用、
 右键菜单（含以管理员身份运行）、自动隐藏、系统托盘、配置持久化。
+
+> 上面那张是实拍（不是效果图）：Dock 浮在桌面最底层，下面是任务栏 ——
+> 两者**零重叠**共存。图标都是真实的程序图标（含大文件夹）。
 
 > **当前状态：P1 完成。** 功能项全部实现，可自动化的验证项全部通过。
 > 剩余两项验收需要**会话之外的条件**（真实 8 小时流逝时间 / 人工确认 UAC 弹窗），见文末。
@@ -242,8 +249,11 @@ pwsh -File scripts/soak.ps1            # 后台常驻，正常用电脑就行
 - [x] 没有 `.cargo/config.toml` 之类的国内镜像配置（那会让别人 `cargo build` 直接失败）
 - [x] `Cargo.lock` / `package-lock.json` 都提交（二进制项目要锁版本）
 - [x] LICENSE 已加（**MIT**，署名 `EvanLofton`；要换协议或改署名就改这一份）
-- [ ] 仓库图标还是 Tauri 默认的 `icons/icon.ico` —— 想要自己的图标，替换
-      `app/src-tauri/icons/` 后跑一次 `cargo tauri icon <你的图.png>` 重新生成各尺寸
+- [x] README 有实拍截图（`docs/images/dock.png`）
+- [x] 应用图标是自己画的（`scripts/make-icon.ps1`，纯 System.Drawing，**不依赖任何外部素材** ——
+      把网上找的图塞进 MIT 仓库是版权坑；想换风格改脚本重跑即可，产物是
+      `icons/icon.png` + 多尺寸 `icons/icon.ico`）
+- [ ] GitHub 的 **Social preview**（仓库设置里单独传一张 1280×640 图）—— 这个只能在网页上设
 - [ ] UI 文案目前**只有中文**（这是早先"不做 i18n"的决定）。要有英文界面得另开一轮工作
 
 ## 配置参考
