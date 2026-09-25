@@ -16,7 +16,27 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.png", "icons/icon.ico"],
+    "publisher": "EvanLofton",
+    "copyright": "Copyright © 2026 EvanLofton",
+    "license": "MIT",
+    "licenseFile": "LICENSE.txt",
+    "homepage": "https://github.com/EvanLofton/MyDock",
     "shortDescription": "macOS 风格的 Windows 程序坞",
-    "longDescription": "常驻桌面的 Dock：毛玻璃、鱼眼放大、右键菜单、大文件夹、自动隐藏。与任务栏共存（按 rcWork 留空）。"
+    "longDescription": "常驻桌面的 Dock：毛玻璃、鱼眼放大、右键菜单、大文件夹、自动隐藏。与任务栏共存（按 rcWork 留空）。",
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "icons/installer-header.bmp",
+        "uninstallerHeaderImage": "icons/installer-header.bmp",
+        "sidebarImage": "icons/installer-sidebar.bmp"
+      },
+      "wix": {
+        "language": ["zh-CN", "en-US"]
+      }
+    }
   }
 }

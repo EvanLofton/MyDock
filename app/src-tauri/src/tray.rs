@@ -59,11 +59,16 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     // Dock 自带的「临时文件夹」：一个真实目录（`%LOCALAPPDATA%\dev.local.dock\临时文件`），
     // 点开就是资源管理器 —— 用户往里丢临时文件。放在最左侧。
     let temp = MenuItem::with_id(app, "add-temp", "添加临时文件夹", true, None::<&str>)?;
+    // 「打开日志目录」/「打开配置目录」：这两个目录**不在安装目录下**（见 README），
+    // 埋在 %LOCALAPPDATA% / %APPDATA% 里用户找不到 —— 出问题时第一个要找的就是日志。
+    let open_logs = MenuItem::with_id(app, "open-logs", "打开日志目录", true, None::<&str>)?;
+    let open_cfg = MenuItem::with_id(app, "open-config", "打开配置目录", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
         &[
-            &add, &loc_menu, &temp, &settings, &autohide, &autostart, &sep, &quit,
+            &add, &loc_menu, &temp, &settings, &autohide, &autostart, &open_logs, &open_cfg, &sep,
+            &quit,
         ],
     )?;
 
@@ -119,6 +124,22 @@ fn on_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
         "settings" => {
             if let Err(e) = crate::settings_window::open(app) {
                 log_error!("[托盘] 打开设置失败: {e}");
+            }
+        }
+        // 日志与配置**不在安装目录下**（Program Files 不可写、且升级时不该被清掉），
+        // 所以给两个直达入口 —— 出问题时要日志、要备份时要配置。
+        "open-logs" => {
+            let dir = crate::logging::log_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            if let Err(e) = crate::apps::launch(&dir.to_string_lossy(), false) {
+                log_error!("[托盘] 打开日志目录失败（{}）: {e}", dir.display());
+            }
+        }
+        "open-config" => {
+            let dir = crate::store::config_dir(app);
+            let _ = std::fs::create_dir_all(&dir);
+            if let Err(e) = crate::apps::launch(&dir.to_string_lossy(), false) {
+                log_error!("[托盘] 打开配置目录失败（{}）: {e}", dir.display());
             }
         }
         "add-temp" => {

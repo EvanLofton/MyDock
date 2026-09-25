@@ -817,6 +817,16 @@ pub fn config_path(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("dock-config.json"))
 }
 
+/// 配置文件**所在目录**（托盘「打开配置目录」用；与 [`config_path`] 同一套规则）。
+pub fn config_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = std::env::var("DOCK_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// 读取配置。文件不存在或解析失败一律退回默认值 —— 配置坏了不应该让程序起不来。
 pub fn load(app: &AppHandle) -> Preferences {
     let p = config_path(app);
