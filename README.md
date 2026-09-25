@@ -22,6 +22,9 @@
 「Visual Studio Build Tools + 桌面 C++ 工作负载」即可）。WebView2 运行时 Win11 自带。
 
 ```powershell
+git clone https://github.com/EvanLofton/MyDock.git
+cd MyDock
+
 # ① 前端（生成 app/dist —— tauri.conf.json 的 frontendDist 指向它，缺了后端起不来）
 cd app
 npm install
@@ -253,7 +256,9 @@ pwsh -File scripts/soak.ps1            # 后台常驻，正常用电脑就行
 - [x] 应用图标是自己画的（`scripts/make-icon.ps1`，纯 System.Drawing，**不依赖任何外部素材** ——
       把网上找的图塞进 MIT 仓库是版权坑；想换风格改脚本重跑即可，产物是
       `icons/icon.png` + 多尺寸 `icons/icon.ico`）
-- [ ] GitHub 的 **Social preview**（仓库设置里单独传一张 1280×640 图）—— 这个只能在网页上设
+- [x] **Social preview 卡片图已生成**：`docs/images/social-preview.png`（1280×640，由
+      `scripts/make-social-preview.ps1` 用仓库自己的图标 + 实拍截图合成）。
+      ⚠️ 上传这一步**只能在网页上做**：仓库 → Settings → Social preview → Upload an image
 - [ ] UI 文案目前**只有中文**（这是早先"不做 i18n"的决定）。要有英文界面得另开一轮工作
 
 ## 配置参考
